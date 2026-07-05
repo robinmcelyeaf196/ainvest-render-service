@@ -1,0 +1,13 @@
+{
+  "name": "ainvest-render-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HTTP ffmpeg renderer for AInvest n8n Cloud video workflow.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
