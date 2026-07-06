@@ -11,10 +11,9 @@ const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-06-landscape-product-first-v7";
+const VERSION = "2026-07-06-landscape-subtitles-v8";
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
-const DEFAULT_HIGHLIGHT_BOX = { x: 0.56, y: 0.42, w: 0.22, h: 0.07 };
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
@@ -273,17 +272,7 @@ async function buildScreenVideoFromImages(workDir, urls, secondsPerImage) {
 }
 
 function normalizeHighlightBox(value) {
-  const source = value && typeof value === "object" ? value : DEFAULT_HIGHLIGHT_BOX;
-  const raw = ["x", "y", "w", "h"].map((key) => Number(source[key]));
-  if (raw.some((number) => !Number.isFinite(number) || number <= 0)) return null;
-  const [x, y, w, h] = raw;
-  const normalized = x <= 1 && y <= 1 && w <= 1 && h <= 1;
-  return {
-    x: Math.round(normalized ? x * CANVAS_WIDTH : x),
-    y: Math.round(normalized ? y * CANVAS_HEIGHT : y),
-    w: Math.round(normalized ? w * CANVAS_WIDTH : w),
-    h: Math.round(normalized ? h * CANVAS_HEIGHT : h),
-  };
+  return null;
 }
 
 function runFfmpeg(workDir, durationSeconds, highlightBox) {
@@ -304,7 +293,7 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
     ...filterSteps,
     "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.08:0.05,scale=-1:170[avatar]",
     `[${productLayer}][avatar]overlay=40:H-h-36:eof_action=repeat:repeatlast=1[with_avatar]`,
-    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=1.4,Shadow=0,Alignment=1,MarginL=250,MarginR=40,MarginV=42'[final]",
+    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=14,PrimaryColour=&HFFFFFF&,OutlineColour=&HFF5C0B&,BorderStyle=1,Outline=0.9,Shadow=0,Alignment=2,MarginL=300,MarginR=80,MarginV=28'[final]",
   ].join(";");
   const args = [
     "-y",
