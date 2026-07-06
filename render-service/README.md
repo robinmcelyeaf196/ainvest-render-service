@@ -2,7 +2,7 @@
 
 Small HTTP service for n8n Cloud. It downloads the AInvest screen recording, HeyGen avatar video, and SRT captions, then runs ffmpeg and returns the final MP4 as the response body. It can also store uploaded SRT/MP4 files and serve them back with public `/files/...` URLs.
 
-The default composition is designed for vertical TikTok-style product demos: blurred screen recording as the full background, the product screen recording as the foreground, the avatar over the product layer, and burned-in captions as the top layer.
+The default composition is designed for vertical TikTok-style product demos: the product screen recording fills the full 9:16 frame, the avatar is keyed and kept small in a lower corner, and burned-in captions use white text with a blue outline near the bottom.
 
 ## Endpoints
 
@@ -18,9 +18,12 @@ The default composition is designed for vertical TikTok-style product demos: blu
   "idea_id": "test_001",
   "screen_recording_url": "https://drive.google.com/file/d/.../view",
   "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
-  "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n"
+  "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n",
+  "highlight_box": { "x": 0.56, "y": 0.42, "w": 0.22, "h": 0.07 }
 }
 ```
+
+`highlight_box` is optional. Values from 0 to 1 are treated as percentages of the 540x960 render frame; larger values are treated as pixels.
 
 If `RENDER_API_KEY` is set, callers must send it as the `x-render-key` header.
 

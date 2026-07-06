@@ -10,7 +10,7 @@ const { URL } = require("url");
 const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
-const VERSION = "2026-07-06-avatar-composition-v4";
+const VERSION = "2026-07-06-product-first-render-v5";
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
@@ -177,15 +177,37 @@ function clampDurationSeconds(value) {
   return Math.min(Math.max(parsed, 5), 60);
 }
 
-function runFfmpeg(workDir, durationSeconds) {
+function normalizeHighlightBox(value) {
+  if (!value || typeof value !== "object") return null;
+  const raw = ["x", "y", "w", "h"].map((key) => Number(value[key]));
+  if (raw.some((number) => !Number.isFinite(number) || number <= 0)) return null;
+  const [x, y, w, h] = raw;
+  const normalized = x <= 1 && y <= 1 && w <= 1 && h <= 1;
+  return {
+    x: Math.round(normalized ? x * 540 : x),
+    y: Math.round(normalized ? y * 960 : y),
+    w: Math.round(normalized ? w * 540 : w),
+    h: Math.round(normalized ? h * 960 : h),
+  };
+}
+
+function runFfmpeg(workDir, durationSeconds, highlightBox) {
   const duration = clampDurationSeconds(durationSeconds);
+  const highlight = normalizeHighlightBox(highlightBox);
+  const productLayer = highlight ? "product_highlight" : "product";
+  const filterSteps = [
+    "[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,eq=brightness=-0.03:saturation=1.08[product]",
+  ];
+  if (highlight) {
+    filterSteps.push(`[product]drawbox=x=${highlight.x}:y=${highlight.y}:w=${highlight.w}:h=${highlight.h}:color=0x0B5CFF@0.95:t=4[product_highlight]`);
+  }
   const filterComplex = [
-    "[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,boxblur=24:2,eq=brightness=-0.08:saturation=0.85[bg]",
-    "[0:v]scale=510:900:force_original_aspect_ratio=decrease[product]",
-    "[bg][product]overlay=(W-w)/2:70[scene]",
-    "[1:v]crop=iw*0.64:ih:(iw-iw*0.64)/2:0,format=rgba,chromakey=0x00FF00:0.12:0.05,scale=-1:430[avatar]",
-    "[scene][avatar]overlay=26:280:eof_action=repeat:repeatlast=1[with_avatar]",
-    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=3,Shadow=1,Alignment=2,MarginV=90'[final]",
+    ...filterSteps,
+    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.14:0.08,colorkey=0xD0D0D0:0.18:0.08,scale=-1:260,split[avatar_color][avatar_mask_src]",
+    "[avatar_mask_src]alphaextract,boxblur=2:1[avatar_mask]",
+    "[avatar_color][avatar_mask]alphamerge[avatar]",
+    `[${productLayer}][avatar]overlay=W-w-18:H-h-96:eof_action=repeat:repeatlast=1[with_avatar]`,
+    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=36'[final]",
   ].join(";");
   const args = [
     "-y",
@@ -259,7 +281,7 @@ async function handleRender(req, res) {
     ]);
     console.log("[render] downloads complete");
     fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
-    await runFfmpeg(workDir, durationSeconds);
+    await runFfmpeg(workDir, durationSeconds, body.highlight_box);
     console.log("[render] ffmpeg complete");
 
     const outputPath = path.join(workDir, "final_output.mp4");
