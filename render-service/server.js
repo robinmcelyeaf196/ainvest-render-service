@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-06-landscape-subtitles-v8";
+const VERSION = "2026-07-06-landscape-avatar-crop-v9";
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
@@ -291,7 +291,7 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
   }
   const filterComplex = [
     ...filterSteps,
-    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.08:0.05,scale=-1:170[avatar]",
+    "[1:v]crop=iw*0.42:ih:(iw-iw*0.42)/2:0,format=rgba,chromakey=0x00FF00:0.08:0.05,scale=-1:170[avatar]",
     `[${productLayer}][avatar]overlay=40:H-h-36:eof_action=repeat:repeatlast=1[with_avatar]`,
     "[with_avatar]subtitles=captions.srt:force_style='Fontsize=14,PrimaryColour=&HFFFFFF&,OutlineColour=&HFF5C0B&,BorderStyle=1,Outline=0.9,Shadow=0,Alignment=2,MarginL=300,MarginR=80,MarginV=28'[final]",
   ].join(";");
