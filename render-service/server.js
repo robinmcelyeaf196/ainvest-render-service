@@ -12,6 +12,10 @@ const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
+const STORAGE_DIR = process.env.STORAGE_DIR || path.join(process.cwd(), "storage");
+
+fs.mkdirSync(STORAGE_DIR, { recursive: true });
 
 function sendJson(res, status, payload) {
   const body = Buffer.from(JSON.stringify(payload));
@@ -65,6 +69,38 @@ function normalizeDownloadUrl(rawUrl) {
   return value;
 }
 
+function sanitizeName(value, fallback = "file") {
+  return String(value || fallback)
+    .replace(/\.[A-Za-z0-9]+$/, "")
+    .replace(/[^A-Za-z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "") || fallback;
+}
+
+function extensionFromContentType(contentType, fallback = ".bin") {
+  const value = String(contentType || "").toLowerCase();
+  if (value.includes("video/mp4")) return ".mp4";
+  if (value.includes("application/x-subrip") || value.includes("text/plain")) return ".srt";
+  if (value.includes("video/quicktime")) return ".mov";
+  if (value.includes("video/webm")) return ".webm";
+  return fallback;
+}
+
+function mimeTypeFromFile(fileName) {
+  const ext = path.extname(fileName).toLowerCase();
+  if (ext === ".mp4") return "video/mp4";
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".srt") return "application/x-subrip";
+  return "application/octet-stream";
+}
+
+function buildPublicUrl(req, fileName) {
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  const host = req.headers.host;
+  return `${proto}://${host}/files/${encodeURIComponent(fileName)}`;
+}
+
 function downloadToFile(rawUrl, filePath, redirectCount = 0) {
   const url = normalizeDownloadUrl(rawUrl);
   const parsed = new URL(url);
@@ -105,6 +141,35 @@ function downloadToFile(rawUrl, filePath, redirectCount = 0) {
   });
 }
 
+function saveRequestBodyToFile(req, filePath) {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(filePath);
+    let total = 0;
+
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > MAX_UPLOAD_BYTES) {
+        output.destroy();
+        reject(new Error("Uploaded file exceeds MAX_UPLOAD_BYTES"));
+        req.destroy();
+        return;
+      }
+      output.write(chunk);
+    });
+
+    req.on("end", () => {
+      output.end(() => resolve(total));
+    });
+
+    req.on("error", (error) => {
+      output.destroy();
+      reject(error);
+    });
+
+    output.on("error", reject);
+  });
+}
+
 function runFfmpeg(workDir) {
   const args = [
     "-y",
@@ -113,7 +178,7 @@ function runFfmpeg(workDir) {
     "-i",
     "heygen_avatar.mp4",
     "-filter_complex",
-    "[1:v]chromakey=0x00FF00:0.1:0.2,scale=360:640[avatar];[0:v][avatar]overlay=W-w-20:H-h-20[base];[base]subtitles=captions.srt:force_style='Fontsize=22,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3'[final]",
+    "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[screen];[1:v]chromakey=0x00FF00:0.1:0.2,scale=360:640[avatar];[screen][avatar]overlay=W-w-20:H-h-20[base];[base]subtitles=captions.srt:force_style='Fontsize=22,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3'[final]",
     "-map",
     "[final]",
     "-map",
@@ -186,9 +251,64 @@ async function handleRender(req, res) {
   }
 }
 
+async function handleUpload(req, res) {
+  if (!requireAuth(req, res)) return;
+
+  try {
+    const parsed = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+    const kind = sanitizeName(parsed.searchParams.get("kind") || "file");
+    const ideaId = sanitizeName(parsed.searchParams.get("idea_id") || kind);
+    const headerFileName = String(req.headers["x-file-name"] || "").trim();
+    const headerExt = path.extname(headerFileName);
+    const ext = headerExt || extensionFromContentType(req.headers["content-type"], kind === "captions" ? ".srt" : ".bin");
+    const unique = crypto.randomUUID();
+    const fileName = `${kind}-${ideaId}-${unique}${ext}`;
+    const filePath = path.join(STORAGE_DIR, fileName);
+
+    await saveRequestBodyToFile(req, filePath);
+
+    sendJson(res, 200, {
+      ok: true,
+      file_name: fileName,
+      url: buildPublicUrl(req, fileName),
+      bytes: fs.statSync(filePath).size,
+    });
+  } catch (error) {
+    sendJson(res, 500, { error: error.message });
+  }
+}
+
+function handleStaticFile(req, res) {
+  const encodedName = req.url.replace(/^\/files\//, "");
+  const fileName = path.basename(decodeURIComponent(encodedName || ""));
+  const filePath = path.join(STORAGE_DIR, fileName);
+
+  if (!fileName || !fs.existsSync(filePath)) {
+    sendJson(res, 404, { error: "File not found" });
+    return;
+  }
+
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    "content-type": mimeTypeFromFile(fileName),
+    "content-length": stat.size,
+    "cache-control": "public, max-age=31536000, immutable",
+    "content-disposition": `inline; filename="${fileName}"`,
+  });
+  fs.createReadStream(filePath).pipe(res);
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     sendJson(res, 200, { ok: true, ffmpeg: FFMPEG_BIN });
+    return;
+  }
+  if ((req.method === "GET" || req.method === "HEAD") && req.url.startsWith("/files/")) {
+    handleStaticFile(req, res);
+    return;
+  }
+  if (req.method === "POST" && req.url.startsWith("/upload")) {
+    handleUpload(req, res);
     return;
   }
   if (req.method === "POST" && req.url === "/render") {
