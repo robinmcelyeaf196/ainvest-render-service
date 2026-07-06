@@ -10,6 +10,7 @@ const { URL } = require("url");
 const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
+const VERSION = "2026-07-06-low-resource-render-v2";
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
@@ -170,29 +171,47 @@ function saveRequestBodyToFile(req, filePath) {
   });
 }
 
-function runFfmpeg(workDir) {
+function clampDurationSeconds(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 45;
+  return Math.min(Math.max(parsed, 5), 60);
+}
+
+function runFfmpeg(workDir, durationSeconds) {
+  const duration = clampDurationSeconds(durationSeconds);
   const args = [
     "-y",
+    "-nostdin",
+    "-hide_banner",
     "-i",
     "screen_recording.mp4",
     "-i",
     "heygen_avatar.mp4",
     "-filter_complex",
-    "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2[screen];[1:v]chromakey=0x00FF00:0.1:0.2,scale=360:640[avatar];[screen][avatar]overlay=W-w-20:H-h-20[base];[base]subtitles=captions.srt:force_style='Fontsize=22,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3'[final]",
+    "[0:v]scale=540:960:force_original_aspect_ratio=decrease,pad=540:960:(ow-iw)/2:(oh-ih)/2[screen];[1:v]chromakey=0x00FF00:0.1:0.2,scale=180:320[avatar];[screen][avatar]overlay=W-w-12:H-h-12[base];[base]subtitles=captions.srt:force_style='Fontsize=16,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3'[final]",
     "-map",
     "[final]",
     "-map",
     "1:a?",
+    "-t",
+    String(duration),
+    "-r",
+    "30",
     "-c:v",
     "libx264",
     "-crf",
-    "20",
+    "28",
     "-preset",
-    "veryfast",
+    "ultrafast",
+    "-threads",
+    "1",
+    "-pix_fmt",
+    "yuv420p",
     "-c:a",
     "aac",
     "-b:a",
-    "128k",
+    "96k",
+    "-shortest",
     "-movflags",
     "+faststart",
     "final_output.mp4",
@@ -220,20 +239,25 @@ async function handleRender(req, res) {
     const screenUrl = body.screen_recording_url;
     const avatarUrl = body.heygen_video_url;
     const srtContent = String(body.srt_content || "").trim();
+    const durationSeconds = clampDurationSeconds(body.duration_seconds || body.estimated_duration_seconds);
     if (!screenUrl) throw new Error("screen_recording_url is required");
     if (!avatarUrl) throw new Error("heygen_video_url is required");
     if (!srtContent) throw new Error("srt_content is required");
 
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), "ainvest-render-"));
+    console.log(`[render] start idea_id=${body.idea_id || "unknown"} duration=${durationSeconds}s workDir=${workDir}`);
     await Promise.all([
       downloadToFile(screenUrl, path.join(workDir, "screen_recording.mp4")),
       downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4")),
     ]);
+    console.log("[render] downloads complete");
     fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
-    await runFfmpeg(workDir);
+    await runFfmpeg(workDir, durationSeconds);
+    console.log("[render] ffmpeg complete");
 
     const outputPath = path.join(workDir, "final_output.mp4");
     const stat = fs.statSync(outputPath);
+    console.log(`[render] output bytes=${stat.size}`);
     const fileName = `${String(body.idea_id || "ainvest-demo").replace(/[^A-Za-z0-9_-]/g, "_")}.mp4`;
     res.writeHead(200, {
       "content-type": "video/mp4",
@@ -243,6 +267,7 @@ async function handleRender(req, res) {
     });
     fs.createReadStream(outputPath).pipe(res);
   } catch (error) {
+    console.error(`[render] failed: ${error.stack || error.message}`);
     sendJson(res, 500, { error: error.message });
   } finally {
     if (workDir) {
@@ -300,7 +325,7 @@ function handleStaticFile(req, res) {
 
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
-    sendJson(res, 200, { ok: true, ffmpeg: FFMPEG_BIN });
+    sendJson(res, 200, { ok: true, ffmpeg: FFMPEG_BIN, version: VERSION });
     return;
   }
   if ((req.method === "GET" || req.method === "HEAD") && req.url.startsWith("/files/")) {
