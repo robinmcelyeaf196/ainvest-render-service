@@ -11,7 +11,10 @@ const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-06-product-first-render-v6";
+const VERSION = "2026-07-06-landscape-product-first-v7";
+const CANVAS_WIDTH = 1280;
+const CANVAS_HEIGHT = 720;
+const DEFAULT_HIGHLIGHT_BOX = { x: 0.56, y: 0.42, w: 0.22, h: 0.07 };
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
@@ -253,7 +256,7 @@ async function buildScreenVideoFromImages(workDir, urls, secondsPerImage) {
       "-i",
       "slides.txt",
       "-vf",
-      "scale=540:960:force_original_aspect_ratio=increase,crop=540:960,format=yuv420p",
+      `scale=${CANVAS_WIDTH}:${CANVAS_HEIGHT}:force_original_aspect_ratio=decrease,pad=${CANVAS_WIDTH}:${CANVAS_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p`,
       "-r",
       "30",
       "-c:v",
@@ -270,16 +273,16 @@ async function buildScreenVideoFromImages(workDir, urls, secondsPerImage) {
 }
 
 function normalizeHighlightBox(value) {
-  if (!value || typeof value !== "object") return null;
-  const raw = ["x", "y", "w", "h"].map((key) => Number(value[key]));
+  const source = value && typeof value === "object" ? value : DEFAULT_HIGHLIGHT_BOX;
+  const raw = ["x", "y", "w", "h"].map((key) => Number(source[key]));
   if (raw.some((number) => !Number.isFinite(number) || number <= 0)) return null;
   const [x, y, w, h] = raw;
   const normalized = x <= 1 && y <= 1 && w <= 1 && h <= 1;
   return {
-    x: Math.round(normalized ? x * 540 : x),
-    y: Math.round(normalized ? y * 960 : y),
-    w: Math.round(normalized ? w * 540 : w),
-    h: Math.round(normalized ? h * 960 : h),
+    x: Math.round(normalized ? x * CANVAS_WIDTH : x),
+    y: Math.round(normalized ? y * CANVAS_HEIGHT : y),
+    w: Math.round(normalized ? w * CANVAS_WIDTH : w),
+    h: Math.round(normalized ? h * CANVAS_HEIGHT : h),
   };
 }
 
@@ -287,17 +290,21 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
   const duration = clampDurationSeconds(durationSeconds);
   const highlight = normalizeHighlightBox(highlightBox);
   const productLayer = highlight ? "product_highlight" : "product";
+  const productMaxWidth = Math.round(CANVAS_WIDTH * 0.95);
+  const productMaxHeight = Math.round(CANVAS_HEIGHT * 0.95);
   const filterSteps = [
-    "[0:v]scale=540:960:force_original_aspect_ratio=increase,crop=540:960,eq=brightness=-0.03:saturation=1.08[product]",
+    `[0:v]scale=${CANVAS_WIDTH}:${CANVAS_HEIGHT}:force_original_aspect_ratio=increase,crop=${CANVAS_WIDTH}:${CANVAS_HEIGHT},gblur=sigma=12,eq=brightness=-0.12:saturation=0.9[product_bg]`,
+    `[0:v]scale=${productMaxWidth}:${productMaxHeight}:force_original_aspect_ratio=decrease,format=rgba[product_fg]`,
+    `[product_bg][product_fg]overlay=(W-w)/2:(H-h)/2[product]`,
   ];
   if (highlight) {
     filterSteps.push(`[product]drawbox=x=${highlight.x}:y=${highlight.y}:w=${highlight.w}:h=${highlight.h}:color=0x0B5CFF@0.95:t=4[product_highlight]`);
   }
   const filterComplex = [
     ...filterSteps,
-    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.14:0.08,scale=-1:250[avatar]",
-    `[${productLayer}][avatar]overlay=W-w-18:H-h-96:eof_action=repeat:repeatlast=1[with_avatar]`,
-    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=14,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=1.6,Shadow=0,Alignment=2,MarginV=30'[final]",
+    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.08:0.05,scale=-1:170[avatar]",
+    `[${productLayer}][avatar]overlay=40:H-h-36:eof_action=repeat:repeatlast=1[with_avatar]`,
+    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=1.4,Shadow=0,Alignment=1,MarginL=250,MarginR=40,MarginV=42'[final]",
   ].join(";");
   const args = [
     "-y",
