@@ -10,7 +10,8 @@ const { URL } = require("url");
 const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
-const VERSION = "2026-07-06-product-first-render-v5";
+const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
+const VERSION = "2026-07-06-product-first-render-v6";
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
 const MAX_DOWNLOAD_BYTES = Number(process.env.MAX_DOWNLOAD_BYTES || 750_000_000);
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 750_000_000);
@@ -174,7 +175,98 @@ function saveRequestBodyToFile(req, filePath) {
 function clampDurationSeconds(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 45;
-  return Math.min(Math.max(parsed, 5), 60);
+  return Math.min(Math.max(parsed, 2), 180);
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, options);
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 12_000) stdout = stdout.slice(-12_000);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 12_000) stderr = stderr.slice(-12_000);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else reject(new Error(`${command} exited with ${code}: ${stderr}`));
+    });
+  });
+}
+
+async function getMediaDurationSeconds(filePath) {
+  try {
+    const { stdout } = await runCommand(FFPROBE_BIN, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filePath,
+    ]);
+    const duration = Number(stdout.trim());
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  } catch (error) {
+    console.warn(`[render] ffprobe duration unavailable: ${error.message}`);
+    return null;
+  }
+}
+
+function normalizeUrlList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((url) => String(url || "").trim()).filter(Boolean);
+}
+
+function concatFileLine(fileName) {
+  return `file '${fileName.replace(/'/g, "'\\''")}'`;
+}
+
+async function buildScreenVideoFromImages(workDir, urls, secondsPerImage) {
+  const imageDuration = clampDurationSeconds(secondsPerImage || 3);
+  const inputList = [];
+  for (let index = 0; index < urls.length; index += 1) {
+    const fileName = `screen_${String(index).padStart(3, "0")}.img`;
+    await downloadToFile(urls[index], path.join(workDir, fileName));
+    inputList.push(fileName);
+  }
+  const concatText = inputList
+    .flatMap((fileName) => [concatFileLine(fileName), `duration ${imageDuration}`])
+    .concat(concatFileLine(inputList[inputList.length - 1]))
+    .join("\n");
+  fs.writeFileSync(path.join(workDir, "slides.txt"), concatText + "\n", "utf8");
+  await runCommand(
+    FFMPEG_BIN,
+    [
+      "-y",
+      "-nostdin",
+      "-hide_banner",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      "slides.txt",
+      "-vf",
+      "scale=540:960:force_original_aspect_ratio=increase,crop=540:960,format=yuv420p",
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-crf",
+      "24",
+      "screen_recording.mp4",
+    ],
+    { cwd: workDir }
+  );
+  return imageDuration * inputList.length;
 }
 
 function normalizeHighlightBox(value) {
@@ -203,11 +295,9 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
   }
   const filterComplex = [
     ...filterSteps,
-    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.14:0.08,colorkey=0xD0D0D0:0.18:0.08,scale=-1:260,split[avatar_color][avatar_mask_src]",
-    "[avatar_mask_src]alphaextract,boxblur=2:1[avatar_mask]",
-    "[avatar_color][avatar_mask]alphamerge[avatar]",
+    "[1:v]crop=iw*0.58:ih:(iw-iw*0.58)/2:0,format=rgba,chromakey=0x00FF00:0.14:0.08,scale=-1:250[avatar]",
     `[${productLayer}][avatar]overlay=W-w-18:H-h-96:eof_action=repeat:repeatlast=1[with_avatar]`,
-    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=18,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=36'[final]",
+    "[with_avatar]subtitles=captions.srt:force_style='Fontsize=14,PrimaryColour=&HFFFFFF&,OutlineColour=&H0B5CFF&,BorderStyle=1,Outline=1.6,Shadow=0,Alignment=2,MarginV=30'[final]",
   ].join(";");
   const args = [
     "-y",
@@ -265,23 +355,31 @@ async function handleRender(req, res) {
   let workDir;
   try {
     const body = await readJsonBody(req);
+    const screenshotUrls = normalizeUrlList(body.screenshot_urls || body.screen_asset_urls || body.screen_recording_urls);
     const screenUrl = body.screen_recording_url;
     const avatarUrl = body.heygen_video_url;
     const srtContent = String(body.srt_content || "").trim();
     const durationSeconds = clampDurationSeconds(body.duration_seconds || body.estimated_duration_seconds);
-    if (!screenUrl) throw new Error("screen_recording_url is required");
+    if (!screenUrl && !screenshotUrls.length) throw new Error("screen_recording_url or screenshot_urls is required");
     if (!avatarUrl) throw new Error("heygen_video_url is required");
     if (!srtContent) throw new Error("srt_content is required");
 
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), "ainvest-render-"));
     console.log(`[render] start idea_id=${body.idea_id || "unknown"} duration=${durationSeconds}s workDir=${workDir}`);
-    await Promise.all([
-      downloadToFile(screenUrl, path.join(workDir, "screen_recording.mp4")),
-      downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4")),
-    ]);
+    let sourceDurationSeconds = null;
+    if (screenshotUrls.length) {
+      await downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4"));
+      sourceDurationSeconds = await buildScreenVideoFromImages(workDir, screenshotUrls, body.screenshot_duration_seconds);
+    } else {
+      await Promise.all([
+        downloadToFile(screenUrl, path.join(workDir, "screen_recording.mp4")),
+        downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4")),
+      ]);
+      sourceDurationSeconds = await getMediaDurationSeconds(path.join(workDir, "screen_recording.mp4"));
+    }
     console.log("[render] downloads complete");
     fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
-    await runFfmpeg(workDir, durationSeconds, body.highlight_box);
+    await runFfmpeg(workDir, sourceDurationSeconds || durationSeconds, body.highlight_box);
     console.log("[render] ffmpeg complete");
 
     const outputPath = path.join(workDir, "final_output.mp4");

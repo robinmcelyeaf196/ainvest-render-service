@@ -25,6 +25,24 @@ The default composition is designed for vertical TikTok-style product demos: the
 
 `highlight_box` is optional. Values from 0 to 1 are treated as percentages of the 540x960 render frame; larger values are treated as pixels.
 
+For ordered screenshots instead of a screen recording, send the image URLs in display order:
+
+```json
+{
+  "idea_id": "test_001",
+  "screenshot_urls": [
+    "https://example.com/step-1.png",
+    "https://example.com/step-2.png",
+    "https://example.com/step-3.png"
+  ],
+  "screenshot_duration_seconds": 3,
+  "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
+  "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n"
+}
+```
+
+When `screen_recording_url` is used, the service probes the recording duration and renders to that length. When `screenshot_urls` is used, duration is `screenshot_urls.length * screenshot_duration_seconds`.
+
 If `RENDER_API_KEY` is set, callers must send it as the `x-render-key` header.
 
 `POST /upload` accepts the raw file body and returns JSON like:
