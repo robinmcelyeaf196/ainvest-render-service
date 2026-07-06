@@ -43,6 +43,16 @@ For ordered screenshots instead of a screen recording, send the image URLs in di
 
 When `screen_recording_url` is used, the service probes the recording duration and renders to that length. When `screenshot_urls` is used, duration is `screenshot_urls.length * screenshot_duration_seconds`.
 
+## n8n Google Sheet Fields
+
+For the n8n Cloud workflow, `Sheet1` should include these optional columns when a job uses screenshots instead of one recording:
+
+- `screenshot_urls`: public image URLs in display order. Use one URL per line, or a JSON array.
+- `screenshot_duration_seconds`: seconds to show each screenshot. Defaults to `3`.
+- `highlight_box`: optional JSON object such as `{"x":0.56,"y":0.42,"w":0.22,"h":0.07}`.
+
+If `screen_recording_url` is filled, the workflow should use the recording. If `screenshot_urls` is filled and `screen_recording_url` is empty, the workflow should send `screenshot_urls` to `/render` in the same order shown in the sheet.
+
 If `RENDER_API_KEY` is set, callers must send it as the `x-render-key` header.
 
 `POST /upload` accepts the raw file body and returns JSON like:
