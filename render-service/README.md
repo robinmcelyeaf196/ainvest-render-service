@@ -2,7 +2,7 @@
 
 Small HTTP service for n8n Cloud. It downloads the AInvest screen recording, HeyGen avatar video, and SRT captions, then runs ffmpeg and returns the final MP4 as the response body. It can also store uploaded SRT/MP4 files and serve them back with public `/files/...` URLs.
 
-The default composition is designed for 16:9 product-first demos: the product screen recording or screenshots are shown at a normal contained size over a soft product-derived background, the keyed avatar is cropped tightly and kept small in the lower-left corner, and burned-in captions sit at the lower center with a left margin so they do not cover the avatar.
+The default composition is designed for 16:9 product-first demos: the product screen recording or screenshots are shown at a normal contained size over a soft product-derived background, the keyed avatar is cropped tightly and kept slightly larger in the lower-left corner, and burned-in captions sit as horizontal lines across the lower center.
 
 ## Endpoints
 
