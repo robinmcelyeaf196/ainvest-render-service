@@ -1,6 +1,6 @@
 # AInvest Render Service
 
-Small HTTP service for n8n Cloud. It downloads the AInvest screen recording, HeyGen avatar video, and MiniMax-generated SRT captions, then runs ffmpeg and returns the final MP4 as the response body. It can also store uploaded SRT/MP4 files and serve them back with public `/files/...` URLs.
+Small HTTP service for n8n Cloud. It downloads the AInvest screen recording, HeyGen avatar video, aligned SRT captions, and optionally an ElevenLabs narration audio file, then runs ffmpeg and returns the final MP4 as the response body. It can also store uploaded audio/SRT/MP4 files and serve them back with public `/files/...` URLs.
 
 The default composition is designed for 16:9 product-first demos: the product screen recording or screenshots are shown at a normal contained size over a soft product-derived background, the keyed avatar is cropped tightly and kept slightly larger in the lower-left corner, and burned-in captions sit as horizontal lines across the lower center.
 
@@ -18,10 +18,13 @@ The default composition is designed for 16:9 product-first demos: the product sc
   "idea_id": "test_001",
   "screen_recording_url": "https://drive.google.com/file/d/.../view",
   "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
+  "narration_audio_url": "https://your-service.example.com/files/narration-test_001.mp3",
   "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n",
   "highlight_box": { "x": 0.56, "y": 0.42, "w": 0.22, "h": 0.07 }
 }
 ```
+
+When `narration_audio_url` is present, the final MP4 uses that audio track instead of the HeyGen video's embedded audio. This lets n8n pair ElevenLabs timestamped speech with matching SRT captions.
 
 `highlight_box` is currently ignored. The render no longer draws blue highlight boxes by default.
 
@@ -37,6 +40,7 @@ For ordered screenshots instead of a screen recording, send the image URLs in di
   ],
   "screenshot_duration_seconds": 3,
   "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
+  "narration_audio_url": "https://your-service.example.com/files/narration-test_001.mp3",
   "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n"
 }
 ```

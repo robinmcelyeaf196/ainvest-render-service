@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-07-minimax-srt-captions-v12";
+const VERSION = "2026-07-07-elevenlabs-aligned-captions-v13";
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
@@ -275,7 +275,7 @@ function normalizeHighlightBox(value) {
   return null;
 }
 
-function runFfmpeg(workDir, durationSeconds, highlightBox) {
+function runFfmpeg(workDir, durationSeconds, highlightBox, useNarrationAudio = false) {
   const duration = clampDurationSeconds(durationSeconds);
   const highlight = normalizeHighlightBox(highlightBox);
   const productLayer = highlight ? "product_highlight" : "product";
@@ -303,12 +303,17 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
     "screen_recording.mp4",
     "-i",
     "heygen_avatar.mp4",
+  ];
+  if (useNarrationAudio) {
+    args.push("-i", "narration_audio.mp3");
+  }
+  args.push(
     "-filter_complex",
     filterComplex,
     "-map",
     "[final]",
     "-map",
-    "1:a?",
+    useNarrationAudio ? "2:a:0" : "1:a?",
     "-t",
     String(duration),
     "-r",
@@ -329,8 +334,8 @@ function runFfmpeg(workDir, durationSeconds, highlightBox) {
     "96k",
     "-movflags",
     "+faststart",
-    "final_output.mp4",
-  ];
+    "final_output.mp4"
+  );
   return new Promise((resolve, reject) => {
     const child = spawn(FFMPEG_BIN, args, { cwd: workDir });
     let stderr = "";
@@ -354,6 +359,7 @@ async function handleRender(req, res) {
     const screenshotUrls = normalizeUrlList(body.screenshot_urls || body.screen_asset_urls || body.screen_recording_urls);
     const screenUrl = body.screen_recording_url;
     const avatarUrl = body.heygen_video_url;
+    const narrationAudioUrl = body.narration_audio_url || body.elevenlabs_audio_url || body.voice_audio_url;
     const srtContent = String(body.srt_content || "").trim();
     const durationSeconds = clampDurationSeconds(body.duration_seconds || body.estimated_duration_seconds);
     if (!screenUrl && !screenshotUrls.length) throw new Error("screen_recording_url or screenshot_urls is required");
@@ -365,17 +371,25 @@ async function handleRender(req, res) {
     let sourceDurationSeconds = null;
     if (screenshotUrls.length) {
       await downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4"));
+      if (narrationAudioUrl) {
+        await downloadToFile(narrationAudioUrl, path.join(workDir, "narration_audio.mp3"));
+      }
       sourceDurationSeconds = await buildScreenVideoFromImages(workDir, screenshotUrls, body.screenshot_duration_seconds);
     } else {
-      await Promise.all([
+      const downloads = [
         downloadToFile(screenUrl, path.join(workDir, "screen_recording.mp4")),
         downloadToFile(avatarUrl, path.join(workDir, "heygen_avatar.mp4")),
-      ]);
+      ];
+      if (narrationAudioUrl) {
+        downloads.push(downloadToFile(narrationAudioUrl, path.join(workDir, "narration_audio.mp3")));
+      }
+      await Promise.all(downloads);
       sourceDurationSeconds = await getMediaDurationSeconds(path.join(workDir, "screen_recording.mp4"));
     }
     console.log("[render] downloads complete");
     fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
-    await runFfmpeg(workDir, sourceDurationSeconds || durationSeconds, body.highlight_box);
+    const narrationDurationSeconds = narrationAudioUrl ? await getMediaDurationSeconds(path.join(workDir, "narration_audio.mp3")) : null;
+    await runFfmpeg(workDir, narrationDurationSeconds || sourceDurationSeconds || durationSeconds, body.highlight_box, Boolean(narrationAudioUrl));
     console.log("[render] ffmpeg complete");
 
     const outputPath = path.join(workDir, "final_output.mp4");
@@ -387,7 +401,7 @@ async function handleRender(req, res) {
       "content-length": stat.size,
       "content-disposition": `attachment; filename="${fileName}"`,
       "x-render-id": crypto.randomUUID(),
-      "x-caption-source": "minimax_srt",
+      "x-caption-source": narrationAudioUrl ? "elevenlabs_alignment" : "minimax_srt",
     });
     fs.createReadStream(outputPath).pipe(res);
   } catch (error) {
