@@ -2,6 +2,8 @@
 
 Small HTTP service for n8n Cloud. It downloads the AInvest screen recording, HeyGen avatar video, and SRT captions, then runs ffmpeg and returns the final MP4 as the response body. It can also store uploaded SRT/MP4 files and serve them back with public `/files/...` URLs.
 
+If `OPENAI_API_KEY` is configured, the service extracts audio from the HeyGen avatar video and generates fresh word-timestamped SRT captions from the real voice track. The `srt_content` value from n8n is then only a fallback. This keeps the burned-in captions aligned to the actual narration instead of using estimated timing.
+
 The default composition is designed for 16:9 product-first demos: the product screen recording or screenshots are shown at a normal contained size over a soft product-derived background, the keyed avatar is cropped tightly and kept slightly larger in the lower-left corner, and burned-in captions sit as horizontal lines across the lower center.
 
 ## Endpoints
@@ -19,6 +21,7 @@ The default composition is designed for 16:9 product-first demos: the product sc
   "screen_recording_url": "https://drive.google.com/file/d/.../view",
   "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
   "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n",
+  "transcript_text": "The exact English narration sent to HeyGen.",
   "highlight_box": { "x": 0.56, "y": 0.42, "w": 0.22, "h": 0.07 }
 }
 ```
@@ -37,7 +40,8 @@ For ordered screenshots instead of a screen recording, send the image URLs in di
   ],
   "screenshot_duration_seconds": 3,
   "heygen_video_url": "https://files.heygen.ai/video/abc123.mp4",
-  "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n"
+  "srt_content": "1\n00:00:00,000 --> 00:00:02,000\nCaption text\n",
+  "transcript_text": "The exact English narration sent to HeyGen."
 }
 ```
 
@@ -84,6 +88,8 @@ Deploy this folder as a Docker service on Render, Railway, Fly.io, or Google Clo
 
 ```bash
 RENDER_API_KEY=your-long-random-secret
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_TRANSCRIBE_MODEL=whisper-1
 PORT=8080
 ```
 

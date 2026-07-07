@@ -9,9 +9,11 @@ const { URL } = require("url");
 
 const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-07-horizontal-captions-v10";
+const VERSION = "2026-07-07-audio-aligned-captions-v11";
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
@@ -178,6 +180,239 @@ function clampDurationSeconds(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return 45;
   return Math.min(Math.max(parsed, 2), 180);
+}
+
+function formatSrtTime(seconds) {
+  const msTotal = Math.max(0, Math.round(Number(seconds || 0) * 1000));
+  const h = Math.floor(msTotal / 3_600_000);
+  const m = Math.floor((msTotal % 3_600_000) / 60_000);
+  const s = Math.floor((msTotal % 60_000) / 1000);
+  const ms = msTotal % 1000;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+}
+
+function wordsFromTranscription(transcription) {
+  if (Array.isArray(transcription.words) && transcription.words.length) {
+    return transcription.words
+      .map((word) => ({
+        text: String(word.word || "").trim(),
+        start: Number(word.start),
+        end: Number(word.end),
+      }))
+      .filter((word) => word.text && Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start);
+  }
+  return [];
+}
+
+function segmentsFromTranscription(transcription) {
+  if (Array.isArray(transcription.segments) && transcription.segments.length) {
+    return transcription.segments
+      .map((segment) => ({
+        text: String(segment.text || "").replace(/\s+/g, " ").trim(),
+        start: Number(segment.start),
+        end: Number(segment.end),
+      }))
+      .filter((segment) => segment.text && Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start);
+  }
+  return [];
+}
+
+function promptPhrases(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const pipePhrases = text
+    .split("|")
+    .map((phrase) => phrase.trim())
+    .filter(Boolean);
+  if (pipePhrases.length > 1) return pipePhrases;
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((phrase) => phrase.trim())
+    .filter(Boolean);
+}
+
+function captionWordCount(text) {
+  const matches = String(text || "").match(/[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?/g);
+  return matches ? matches.length : 0;
+}
+
+function srtFromCaptions(captions) {
+  return captions
+    .filter((caption) => caption.text)
+    .map((caption, index) => `${index + 1}\n${formatSrtTime(caption.start)} --> ${formatSrtTime(Math.max(caption.end, caption.start + 0.6))}\n${caption.text}`)
+    .join("\n\n");
+}
+
+function buildSrtFromPromptPhrases(words, phrases) {
+  const captions = [];
+  let cursor = 0;
+
+  for (const phrase of phrases) {
+    if (cursor >= words.length) break;
+    const targetCount = Math.max(1, captionWordCount(phrase));
+    const startIndex = cursor;
+    const endIndex = Math.min(words.length - 1, cursor + targetCount - 1);
+    captions.push({
+      text: phrase,
+      start: words[startIndex].start,
+      end: words[endIndex].end,
+    });
+    cursor = endIndex + 1;
+  }
+
+  if (cursor < words.length) {
+    let chunk = [];
+    for (const word of words.slice(cursor)) {
+      chunk.push(word);
+      if (chunk.length >= 10 || /[.!?]$/.test(word.text)) {
+        captions.push({
+          text: chunk.map((item) => item.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").trim(),
+          start: chunk[0].start,
+          end: chunk[chunk.length - 1].end,
+        });
+        chunk = [];
+      }
+    }
+    if (chunk.length) {
+      captions.push({
+        text: chunk.map((item) => item.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").trim(),
+        start: chunk[0].start,
+        end: chunk[chunk.length - 1].end,
+      });
+    }
+  }
+
+  return srtFromCaptions(captions);
+}
+
+function buildSrtFromTimedWords(words, phrases = []) {
+  if (phrases.length) {
+    const phraseSrt = buildSrtFromPromptPhrases(words, phrases);
+    if (phraseSrt) return phraseSrt;
+  }
+
+  const captions = [];
+  let chunk = [];
+
+  function flush() {
+    if (!chunk.length) return;
+    const text = chunk.map((word) => word.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").trim();
+    captions.push({
+      text,
+      start: chunk[0].start,
+      end: chunk[chunk.length - 1].end,
+    });
+    chunk = [];
+  }
+
+  for (const word of words) {
+    const nextText = [...chunk.map((item) => item.text), word.text].join(" ");
+    const endsSentence = /[.!?]$/.test(word.text);
+    if (chunk.length && (chunk.length >= 12 || nextText.length > 72)) flush();
+    chunk.push(word);
+    if (endsSentence) flush();
+  }
+  flush();
+
+  return srtFromCaptions(captions);
+}
+
+function buildSrtFromTimedSegments(segments) {
+  const captions = [];
+  for (const segment of segments) {
+    const sentences = segment.text
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+    if (sentences.length <= 1) {
+      captions.push(segment);
+      continue;
+    }
+    const totalChars = sentences.reduce((sum, sentence) => sum + sentence.length, 0);
+    let cursor = segment.start;
+    for (const sentence of sentences) {
+      const share = totalChars ? sentence.length / totalChars : 1 / sentences.length;
+      const duration = Math.max(0.7, (segment.end - segment.start) * share);
+      const end = Math.min(segment.end, cursor + duration);
+      captions.push({ text: sentence, start: cursor, end });
+      cursor = end;
+    }
+  }
+  return srtFromCaptions(captions);
+}
+
+async function extractAvatarAudio(workDir) {
+  const audioPath = path.join(workDir, "avatar_audio.mp3");
+  await runCommand(
+    FFMPEG_BIN,
+    [
+      "-y",
+      "-nostdin",
+      "-hide_banner",
+      "-i",
+      "heygen_avatar.mp4",
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-b:a",
+      "64k",
+      "avatar_audio.mp3",
+    ],
+    { cwd: workDir }
+  );
+  return audioPath;
+}
+
+async function transcribeAudioWithWordTimestamps(audioPath, promptText) {
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is not configured");
+
+  const audio = fs.readFileSync(audioPath);
+  const form = new FormData();
+  form.append("file", new Blob([audio], { type: "audio/mpeg" }), "avatar_audio.mp3");
+  form.append("model", OPENAI_TRANSCRIBE_MODEL);
+  form.append("response_format", "verbose_json");
+  form.append("language", "en");
+  form.append("timestamp_granularities[]", "word");
+  form.append("timestamp_granularities[]", "segment");
+  if (promptText) {
+    form.append("prompt", String(promptText).replace(/\s+/g, " ").trim().slice(0, 1800));
+  }
+
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: form,
+  });
+
+  const text = await response.text();
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch (error) {
+    payload = { raw: text.slice(0, 500) };
+  }
+
+  if (!response.ok) {
+    const message = payload?.error?.message || payload?.raw || JSON.stringify(payload).slice(0, 500);
+    throw new Error(`OpenAI transcription failed ${response.status}: ${message}`);
+  }
+  return payload;
+}
+
+async function buildAlignedSrtFromAvatarAudio(workDir, promptText) {
+  const audioPath = await extractAvatarAudio(workDir);
+  const transcription = await transcribeAudioWithWordTimestamps(audioPath, promptText);
+  const wordSrt = buildSrtFromTimedWords(wordsFromTranscription(transcription), promptPhrases(promptText));
+  if (wordSrt) return wordSrt;
+
+  const segmentSrt = buildSrtFromTimedSegments(segmentsFromTranscription(transcription));
+  if (segmentSrt) return segmentSrt;
+
+  throw new Error("OpenAI transcription did not return usable word or segment timestamps");
 }
 
 function runCommand(command, args, options = {}) {
@@ -354,11 +589,14 @@ async function handleRender(req, res) {
     const screenshotUrls = normalizeUrlList(body.screenshot_urls || body.screen_asset_urls || body.screen_recording_urls);
     const screenUrl = body.screen_recording_url;
     const avatarUrl = body.heygen_video_url;
-    const srtContent = String(body.srt_content || "").trim();
+    const fallbackSrtContent = String(body.srt_content || "").trim();
+    const transcriptText = String(body.transcript_text || body.heygen_input_text || body.narration_script || "").trim();
     const durationSeconds = clampDurationSeconds(body.duration_seconds || body.estimated_duration_seconds);
     if (!screenUrl && !screenshotUrls.length) throw new Error("screen_recording_url or screenshot_urls is required");
     if (!avatarUrl) throw new Error("heygen_video_url is required");
-    if (!srtContent) throw new Error("srt_content is required");
+    if (!OPENAI_API_KEY && !fallbackSrtContent) {
+      throw new Error("srt_content is required when OPENAI_API_KEY is not configured");
+    }
 
     workDir = fs.mkdtempSync(path.join(os.tmpdir(), "ainvest-render-"));
     console.log(`[render] start idea_id=${body.idea_id || "unknown"} duration=${durationSeconds}s workDir=${workDir}`);
@@ -374,7 +612,20 @@ async function handleRender(req, res) {
       sourceDurationSeconds = await getMediaDurationSeconds(path.join(workDir, "screen_recording.mp4"));
     }
     console.log("[render] downloads complete");
-    fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
+    let captions = fallbackSrtContent;
+    let captionSource = "fallback_srt";
+    if (OPENAI_API_KEY) {
+      try {
+        captions = await buildAlignedSrtFromAvatarAudio(workDir, transcriptText || fallbackSrtContent);
+        captionSource = "openai_audio_timestamps";
+        console.log("[render] captions aligned from avatar audio");
+      } catch (error) {
+        if (!captions) throw error;
+        console.warn(`[render] audio-aligned captions failed; using fallback SRT: ${error.message}`);
+      }
+    }
+    if (!captions) throw new Error("No captions available");
+    fs.writeFileSync(path.join(workDir, "captions.srt"), captions + "\n", "utf8");
     await runFfmpeg(workDir, sourceDurationSeconds || durationSeconds, body.highlight_box);
     console.log("[render] ffmpeg complete");
 
@@ -387,6 +638,7 @@ async function handleRender(req, res) {
       "content-length": stat.size,
       "content-disposition": `attachment; filename="${fileName}"`,
       "x-render-id": crypto.randomUUID(),
+      "x-caption-source": captionSource,
     });
     fs.createReadStream(outputPath).pipe(res);
   } catch (error) {
