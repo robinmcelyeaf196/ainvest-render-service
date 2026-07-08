@@ -180,6 +180,59 @@ function clampDurationSeconds(value) {
   return Math.min(Math.max(parsed, 2), 180);
 }
 
+function formatSrtTimestamp(seconds) {
+  const totalMs = Math.max(0, Math.round(Number(seconds || 0) * 1000));
+  const hours = Math.floor(totalMs / 3600000);
+  const minutes = Math.floor((totalMs % 3600000) / 60000);
+  const secs = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  return [hours, minutes, secs].map((value) => String(value).padStart(2, "0")).join(":") + "," + String(ms).padStart(3, "0");
+}
+
+function parseSrtTimestamp(value) {
+  const match = String(value || "").trim().match(/^(\d{2}):(\d{2}):(\d{2}),(\d{3})$/);
+  if (!match) return null;
+  const [, hours, minutes, seconds, millis] = match;
+  return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds) + Number(millis) / 1000;
+}
+
+function scaleSrtContent(srtContent, factor) {
+  const safeFactor = Number(factor);
+  if (!Number.isFinite(safeFactor) || safeFactor <= 0 || Math.abs(safeFactor - 1) < 0.01) {
+    return String(srtContent || "");
+  }
+  return String(srtContent || "").replace(
+    /(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/g,
+    (_, rawStart, rawEnd) => {
+      const start = parseSrtTimestamp(rawStart);
+      const end = parseSrtTimestamp(rawEnd);
+      if (start == null || end == null) return `${rawStart} --> ${rawEnd}`;
+      return `${formatSrtTimestamp(start * safeFactor)} --> ${formatSrtTimestamp(end * safeFactor)}`;
+    }
+  );
+}
+
+function buildAtempoFilter(sourceDurationSeconds, targetDurationSeconds) {
+  const source = Number(sourceDurationSeconds);
+  const target = Number(targetDurationSeconds);
+  if (!Number.isFinite(source) || !Number.isFinite(target) || source <= 0 || target <= 0) return "";
+  const rawFactor = source / target;
+  if (Math.abs(rawFactor - 1) < 0.01) return "";
+
+  const filters = [];
+  let factor = rawFactor;
+  while (factor < 0.5) {
+    filters.push("atempo=0.5");
+    factor /= 0.5;
+  }
+  while (factor > 2.0) {
+    filters.push("atempo=2.0");
+    factor /= 2.0;
+  }
+  filters.push(`atempo=${factor.toFixed(6)}`);
+  return filters.join(",");
+}
+
 function runCommand(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, options);
@@ -385,7 +438,7 @@ function buildScreenshotFrameResponse(urls) {
   };
 }
 
-function runFfmpeg(workDir, durationSeconds, highlightBox, useNarrationAudio = false) {
+function runFfmpeg(workDir, durationSeconds, highlightBox, useNarrationAudio = false, audioTempoFilter = "") {
   const duration = clampDurationSeconds(durationSeconds);
   const highlight = normalizeHighlightBox(highlightBox);
   const productLayer = highlight ? "product_highlight" : "product";
@@ -416,6 +469,9 @@ function runFfmpeg(workDir, durationSeconds, highlightBox, useNarrationAudio = f
   ];
   if (useNarrationAudio) {
     args.push("-i", "narration_audio.mp3");
+  }
+  if (useNarrationAudio && audioTempoFilter) {
+    args.push("-af", audioTempoFilter);
   }
   args.push(
     "-filter_complex",
@@ -497,9 +553,19 @@ async function handleRender(req, res) {
       sourceDurationSeconds = await getMediaDurationSeconds(path.join(workDir, "screen_recording.mp4"));
     }
     console.log("[render] downloads complete");
-    fs.writeFileSync(path.join(workDir, "captions.srt"), srtContent + "\n", "utf8");
     const narrationDurationSeconds = narrationAudioUrl ? await getMediaDurationSeconds(path.join(workDir, "narration_audio.mp3")) : null;
-    await runFfmpeg(workDir, narrationDurationSeconds || sourceDurationSeconds || durationSeconds, body.highlight_box, Boolean(narrationAudioUrl));
+    const targetDurationSeconds = sourceDurationSeconds || durationSeconds || narrationDurationSeconds || 45;
+    let finalSrtContent = srtContent;
+    let audioTempoFilter = "";
+    if (narrationAudioUrl && narrationDurationSeconds && targetDurationSeconds) {
+      const stretchFactor = targetDurationSeconds / narrationDurationSeconds;
+      if (Math.abs(stretchFactor - 1) >= 0.03) {
+        finalSrtContent = scaleSrtContent(srtContent, stretchFactor);
+        audioTempoFilter = buildAtempoFilter(narrationDurationSeconds, targetDurationSeconds);
+      }
+    }
+    fs.writeFileSync(path.join(workDir, "captions.srt"), finalSrtContent + "\n", "utf8");
+    await runFfmpeg(workDir, targetDurationSeconds, body.highlight_box, Boolean(narrationAudioUrl), audioTempoFilter);
     console.log("[render] ffmpeg complete");
 
     const outputPath = path.join(workDir, "final_output.mp4");
