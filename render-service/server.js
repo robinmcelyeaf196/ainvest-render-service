@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 8080);
 const API_KEY = process.env.RENDER_API_KEY || "";
 const FFMPEG_BIN = process.env.FFMPEG_BIN || "ffmpeg";
 const FFPROBE_BIN = process.env.FFPROBE_BIN || "ffprobe";
-const VERSION = "2026-07-07-elevenlabs-aligned-captions-v13";
+const VERSION = "2026-07-08-openai-frame-analysis-v14";
 const CANVAS_WIDTH = 1280;
 const CANVAS_HEIGHT = 720;
 const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || 1_000_000);
@@ -221,8 +221,14 @@ async function getMediaDurationSeconds(filePath) {
 }
 
 function normalizeUrlList(value) {
-  if (!Array.isArray(value)) return [];
-  return value.map((url) => String(url || "").trim()).filter(Boolean);
+  if (Array.isArray(value)) return value.map((url) => String(url || "").trim()).filter(Boolean);
+  const text = String(value || "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) return parsed.map((url) => String(url || "").trim()).filter(Boolean);
+  } catch {}
+  return text.split(/\r?\n|,/).map((url) => url.trim()).filter(Boolean);
 }
 
 function concatFileLine(fileName) {
@@ -273,6 +279,110 @@ async function buildScreenVideoFromImages(workDir, urls, secondsPerImage) {
 
 function normalizeHighlightBox(value) {
   return null;
+}
+
+function buildStoredFileName(kind, ideaId, extension) {
+  return `${sanitizeName(kind)}-${sanitizeName(ideaId || kind)}-${crypto.randomUUID()}${extension}`;
+}
+
+function persistWorkFile(req, workDir, fileName, kind, ideaId, extension) {
+  const sourcePath = path.join(workDir, fileName);
+  const storedFileName = buildStoredFileName(kind, ideaId, extension);
+  const storedPath = path.join(STORAGE_DIR, storedFileName);
+  fs.copyFileSync(sourcePath, storedPath);
+  return {
+    file_name: storedFileName,
+    url: buildPublicUrl(req, storedFileName),
+    bytes: fs.statSync(storedPath).size,
+  };
+}
+
+function buildFramePlan(durationSeconds) {
+  const duration = Math.max(1, Number(durationSeconds || 0));
+  if (duration <= 30) {
+    return { strategy: "8_even_frames_under_30s", timestamps: buildEvenTimestamps(duration, 8) };
+  }
+  if (duration <= 60) {
+    return { strategy: "10_even_frames_30_to_60s", timestamps: buildEvenTimestamps(duration, 10) };
+  }
+  return { strategy: "8s_interval_frames_1_to_3m", timestamps: buildIntervalTimestamps(duration, 8) };
+}
+
+function buildEvenTimestamps(durationSeconds, count) {
+  if (count <= 1) return [Math.min(1, Math.max(0, durationSeconds / 2))];
+  const start = Math.min(1.5, Math.max(0.4, durationSeconds * 0.06));
+  const end = Math.max(start + 0.5, durationSeconds - Math.min(1.5, Math.max(0.4, durationSeconds * 0.06)));
+  const span = Math.max(0.1, end - start);
+  const points = [];
+  for (let index = 0; index < count; index += 1) {
+    const ratio = count === 1 ? 0.5 : index / (count - 1);
+    points.push(Number((start + span * ratio).toFixed(3)));
+  }
+  return Array.from(new Set(points));
+}
+
+function buildIntervalTimestamps(durationSeconds, intervalSeconds) {
+  const timestamps = [];
+  const start = Math.min(3, Math.max(1, intervalSeconds * 0.5));
+  for (let current = start; current < durationSeconds; current += intervalSeconds) {
+    timestamps.push(Number(current.toFixed(3)));
+  }
+  if (!timestamps.length) return buildEvenTimestamps(durationSeconds, 12);
+  return timestamps;
+}
+
+async function extractFramesFromVideo(req, workDir, inputFileName, ideaId, durationSeconds) {
+  const plan = buildFramePlan(durationSeconds);
+  const frames = [];
+  for (let index = 0; index < plan.timestamps.length; index += 1) {
+    const timestamp = plan.timestamps[index];
+    const frameName = `frame_${String(index).padStart(3, "0")}.jpg`;
+    await runCommand(
+      FFMPEG_BIN,
+      [
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-ss",
+        String(timestamp),
+        "-i",
+        inputFileName,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        frameName,
+      ],
+      { cwd: workDir }
+    );
+    const stored = persistWorkFile(req, workDir, frameName, "frame", ideaId, ".jpg");
+    frames.push({
+      index,
+      timestamp_seconds: timestamp,
+      ...stored,
+    });
+  }
+  return {
+    strategy: plan.strategy,
+    frame_count: frames.length,
+    frames,
+    frame_urls: frames.map((frame) => frame.url),
+  };
+}
+
+function buildScreenshotFrameResponse(urls) {
+  const frames = urls.map((url, index) => ({
+    index,
+    timestamp_seconds: index,
+    url,
+    source: "screenshot_url",
+  }));
+  return {
+    strategy: "ordered_screenshot_urls",
+    frame_count: frames.length,
+    frames,
+    frame_urls: frames.map((frame) => frame.url),
+  };
 }
 
 function runFfmpeg(workDir, durationSeconds, highlightBox, useNarrationAudio = false) {
@@ -414,6 +524,51 @@ async function handleRender(req, res) {
   }
 }
 
+async function handleExtractFrames(req, res) {
+  if (!requireAuth(req, res)) return;
+  let workDir;
+  try {
+    const body = await readJsonBody(req);
+    const screenshotUrls = normalizeUrlList(body.screenshot_urls || body.screen_asset_urls || body.screen_recording_urls);
+    const screenUrl = String(body.screen_recording_url || "").trim();
+    const ideaId = String(body.idea_id || "ainvest-demo").trim();
+    if (!screenUrl && !screenshotUrls.length) throw new Error("screen_recording_url or screenshot_urls is required");
+
+    if (screenshotUrls.length && !screenUrl) {
+      sendJson(res, 200, {
+        ok: true,
+        idea_id: ideaId,
+        source_type: "screenshots",
+        duration_seconds: screenshotUrls.length * clampDurationSeconds(body.screenshot_duration_seconds || 3),
+        ...buildScreenshotFrameResponse(screenshotUrls),
+      });
+      return;
+    }
+
+    workDir = fs.mkdtempSync(path.join(os.tmpdir(), "ainvest-extract-frames-"));
+    const inputFileName = "source_recording.mp4";
+    await downloadToFile(screenUrl, path.join(workDir, inputFileName));
+    const durationSeconds = await getMediaDurationSeconds(path.join(workDir, inputFileName));
+    if (!durationSeconds) throw new Error("Could not determine source video duration for frame extraction");
+
+    const extracted = await extractFramesFromVideo(req, workDir, inputFileName, ideaId, durationSeconds);
+    sendJson(res, 200, {
+      ok: true,
+      idea_id: ideaId,
+      source_type: "video",
+      duration_seconds: durationSeconds,
+      ...extracted,
+    });
+  } catch (error) {
+    console.error(`[extract-frames] failed: ${error.stack || error.message}`);
+    sendJson(res, 500, { error: error.message });
+  } finally {
+    if (workDir) {
+      setTimeout(() => fs.rm(workDir, { recursive: true, force: true }, () => {}), 30_000);
+    }
+  }
+}
+
 async function handleUpload(req, res) {
   if (!requireAuth(req, res)) return;
 
@@ -472,6 +627,10 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === "POST" && req.url.startsWith("/upload")) {
     handleUpload(req, res);
+    return;
+  }
+  if (req.method === "POST" && req.url === "/extract-frames") {
+    handleExtractFrames(req, res);
     return;
   }
   if (req.method === "POST" && req.url === "/render") {

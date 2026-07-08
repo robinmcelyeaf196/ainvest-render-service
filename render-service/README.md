@@ -8,6 +8,7 @@ The default composition is designed for 16:9 product-first demos: the product sc
 
 - `GET /health`
 - `POST /render`
+- `POST /extract-frames`
 - `POST /upload?kind=captions|final_video|asset&idea_id=...`
 - `GET /files/<file-name>`
 
@@ -46,6 +47,36 @@ For ordered screenshots instead of a screen recording, send the image URLs in di
 ```
 
 When `screen_recording_url` is used, the service probes the recording duration and renders to that length. When `screenshot_urls` is used, duration is `screenshot_urls.length * screenshot_duration_seconds`.
+
+`POST /extract-frames` body:
+
+```json
+{
+  "idea_id": "test_001",
+  "screen_recording_url": "https://drive.google.com/file/d/.../view"
+}
+```
+
+or for screenshots:
+
+```json
+{
+  "idea_id": "test_001",
+  "screenshot_urls": [
+    "https://example.com/step-1.png",
+    "https://example.com/step-2.png"
+  ],
+  "screenshot_duration_seconds": 3
+}
+```
+
+For videos, the service downloads the source clip, probes duration, extracts representative JPG frames with ffmpeg, stores them under `/files/...`, and returns frame URLs for downstream analysis. Current extraction rules:
+
+- `<= 30s`: 8 evenly spaced frames
+- `30s - 60s`: 10 evenly spaced frames
+- `1m - 3m`: one frame every 8 seconds
+
+For screenshots, the service simply returns the provided screenshot URLs in order so downstream analysis can inspect them directly without re-encoding.
 
 ## n8n Google Sheet Fields
 
